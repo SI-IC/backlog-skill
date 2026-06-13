@@ -10,7 +10,28 @@ from datetime import datetime, timezone
 PRIORITIES = ("low", "medium", "high")
 STATUSES = ("open", "done", "cancelled")
 PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
-FIELD_ORDER = ("id", "title", "priority", "status", "created", "updated")
+FIELD_ORDER = ("id", "title", "priority", "status", "created", "updated", "source")
+ANYLEVEL_FILES = ("CLAUDE.md", "AGENTS.md", "GEMINI.md")
+ROOT_DUMP_FILES = (
+    "TODO.md",
+    "TODOS.md",
+    "NOTES.md",
+    "BACKLOG.md",
+    "ROADMAP.md",
+    "FIXME.md",
+)
+SKIP_DIRS = {
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    "vendor",
+    "target",
+    ".next",
+    ".venv",
+    "venv",
+    "__pycache__",
+}
 
 
 def slugify(title, maxlen=50):
@@ -126,7 +147,7 @@ def iso(dt):
     )
 
 
-def cmd_add(dirpath, title, priority, body, now):
+def cmd_add(dirpath, title, priority, body, now, source=None):
     if priority not in PRIORITIES:
         raise ValueError(f"invalid priority: {priority}")
     title = sanitize_oneline(title)
@@ -144,6 +165,8 @@ def cmd_add(dirpath, title, priority, body, now):
             "created": ts,
             "updated": ts,
         }
+        if source:
+            meta["source"] = sanitize_oneline(source)
         path = os.path.join(dirpath, f"{nid}-{slugify(title)}.md")
         try:
             with open(path, "x", encoding="utf-8") as f:
@@ -251,17 +274,74 @@ def cmd_update(dirpath, id_, fields, body, now):
     _write_entry(e)
 
 
-def resolve_dir(start=None):
+def find_root(start=None):
     cur = os.path.abspath(start or os.getcwd())
     d = cur
     while True:
         # os.path.exists, not isdir: in git worktrees ".git" is a file.
         if os.path.exists(os.path.join(d, ".git")):
-            return os.path.join(d, "docs", "backlogs")
+            return d
         parent = os.path.dirname(d)
         if parent == d:
-            return os.path.join(cur, "docs", "backlogs")
+            return cur
         d = parent
+
+
+def resolve_dir(start=None):
+    return os.path.join(find_root(start), "docs", "backlogs")
+
+
+def _within(path, base):
+    path = os.path.abspath(path)
+    base = os.path.abspath(base)
+    return path == base or path.startswith(base + os.sep)
+
+
+def scan_targets(start=None, home=None):
+    """Existing files to scan for scattered backlog items.
+
+    In-repo: CLAUDE/AGENTS/GEMINI.md at any level, root-level dump files,
+    docs/**/*.md — excluding our own storage and spec/plan dirs. Out-of-repo:
+    this project's Claude memory dir only.
+    """
+    root = find_root(start)
+    home = home or os.path.expanduser("~")
+    backlogs_dir = os.path.join(root, "docs", "backlogs")
+    superpowers_dir = os.path.join(root, "docs", "superpowers")
+    docs_dir = os.path.join(root, "docs")
+    targets = []
+
+    for name in ROOT_DUMP_FILES:
+        p = os.path.join(root, name)
+        if os.path.isfile(p):
+            targets.append(p)
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        if _within(dirpath, backlogs_dir) or _within(dirpath, superpowers_dir):
+            dirnames[:] = []
+            continue
+        for fn in filenames:
+            full = os.path.join(dirpath, fn)
+            if fn in ANYLEVEL_FILES:
+                targets.append(full)
+            elif fn.endswith(".md") and _within(dirpath, docs_dir):
+                targets.append(full)
+
+    enc = os.path.abspath(start or os.getcwd()).replace(os.sep, "-")
+    mem_dir = os.path.join(home, ".claude", "projects", enc, "memory")
+    if os.path.isdir(mem_dir):
+        for fn in sorted(os.listdir(mem_dir)):
+            if fn.endswith(".md"):
+                targets.append(os.path.join(mem_dir, fn))
+
+    seen, out = set(), []
+    for p in targets:
+        rp = os.path.abspath(p)
+        if rp not in seen and os.path.isfile(rp):
+            seen.add(rp)
+            out.append(rp)
+    return out
 
 
 def main(argv=None):
@@ -273,6 +353,7 @@ def main(argv=None):
     pa.add_argument("--title", required=True)
     pa.add_argument("--priority", default="medium")
     pa.add_argument("--body", default=None)
+    pa.add_argument("--source", default=None)
 
     pl = sub.add_parser("list")
     pl.add_argument("--status", default="open")
@@ -290,6 +371,8 @@ def main(argv=None):
     pu.add_argument("--priority", default=None)
     pu.add_argument("--body", default=None)
 
+    sub.add_parser("scan-targets")
+
     args = p.parse_args(argv)
     dirpath = args.dir or resolve_dir()
     now = datetime.now(timezone.utc)
@@ -298,7 +381,19 @@ def main(argv=None):
             body = args.body
             if body is None and not sys.stdin.isatty():
                 body = sys.stdin.read()
-            print(cmd_add(dirpath, args.title, args.priority, body or "", now))
+            print(
+                cmd_add(
+                    dirpath,
+                    args.title,
+                    args.priority,
+                    body or "",
+                    now,
+                    source=args.source,
+                )
+            )
+        elif args.cmd == "scan-targets":
+            for target in scan_targets():
+                print(target)
         elif args.cmd == "list":
             status = "all" if args.all else args.status
             print(cmd_list(dirpath, status, args.sort, args.priority, now))

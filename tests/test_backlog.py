@@ -366,5 +366,138 @@ class TestHardening(unittest.TestCase):
         )
 
 
+class TestScanTargets(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.root, ".git"))
+        self.home = tempfile.mkdtemp()
+
+    def _w(self, rel, content="x"):
+        p = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(content)
+        return p
+
+    def _rel(self):
+        return sorted(
+            os.path.relpath(p, self.root)
+            for p in backlog.scan_targets(self.root, self.home)
+            if os.path.abspath(p).startswith(os.path.abspath(self.root))
+        )
+
+    def test_includes_named_and_docs(self):
+        self._w("CLAUDE.md")
+        self._w("TODO.md")
+        self._w("docs/notes.md")
+        self._w("src/CLAUDE.md")
+        rel = self._rel()
+        self.assertIn("CLAUDE.md", rel)
+        self.assertIn("TODO.md", rel)
+        self.assertIn(os.path.join("docs", "notes.md"), rel)
+        self.assertIn(os.path.join("src", "CLAUDE.md"), rel)
+
+    def test_excludes_own_storage_specs_and_random_files(self):
+        self._w("docs/backlogs/1-x.md")
+        self._w("docs/superpowers/specs/s.md")
+        self._w("README.md")
+        self._w("node_modules/pkg/CLAUDE.md")
+        rel = self._rel()
+        self.assertNotIn(os.path.join("docs", "backlogs", "1-x.md"), rel)
+        self.assertNotIn(os.path.join("docs", "superpowers", "specs", "s.md"), rel)
+        self.assertNotIn("README.md", rel)
+        self.assertNotIn(os.path.join("node_modules", "pkg", "CLAUDE.md"), rel)
+
+    def test_root_dump_files_not_nested(self):
+        self._w("TODO.md")
+        self._w("sub/TODO.md")
+        rel = self._rel()
+        self.assertIn("TODO.md", rel)
+        self.assertNotIn(os.path.join("sub", "TODO.md"), rel)
+
+    def test_includes_project_memory(self):
+        enc = os.path.abspath(self.root).replace(os.sep, "-")
+        mem = os.path.join(self.home, ".claude", "projects", enc, "memory")
+        os.makedirs(mem)
+        with open(os.path.join(mem, "MEMORY.md"), "w") as f:
+            f.write("idx")
+        with open(os.path.join(mem, "fact.md"), "w") as f:
+            f.write("task")
+        names = [
+            os.path.basename(p) for p in backlog.scan_targets(self.root, self.home)
+        ]
+        self.assertIn("MEMORY.md", names)
+        self.assertIn("fact.md", names)
+
+    def test_missing_memory_dir_no_error(self):
+        self.assertIsInstance(backlog.scan_targets(self.root, self.home), list)
+
+
+class TestSource(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def test_add_with_source_writes_field(self):
+        nid = backlog.cmd_add(self.tmp, "t", "low", "body", NOW, source="CLAUDE.md")
+        self.assertEqual(
+            backlog.find_entry(self.tmp, nid)["meta"]["source"], "CLAUDE.md"
+        )
+
+    def test_add_without_source_has_no_field(self):
+        nid = backlog.cmd_add(self.tmp, "t", "low", "body", NOW)
+        self.assertNotIn("source", backlog.find_entry(self.tmp, nid)["meta"])
+
+    def test_source_round_trips(self):
+        text = backlog.serialize_entry(
+            {"id": 1, "title": "t", "source": "docs/x.md"}, "b"
+        )
+        self.assertIn("source: docs/x.md", text)
+        self.assertEqual(backlog.parse_entry(text)["meta"]["source"], "docs/x.md")
+
+    def test_add_source_via_cli(self):
+        r = subprocess.run(
+            [
+                sys.executable,
+                SCRIPT,
+                "--dir",
+                self.tmp,
+                "add",
+                "--title",
+                "t",
+                "--priority",
+                "low",
+                "--source",
+                "CLAUDE.md",
+                "--body",
+                "b",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(r.returncode, 0)
+        r2 = subprocess.run(
+            [sys.executable, SCRIPT, "--dir", self.tmp, "show", "1"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("source: CLAUDE.md", r2.stdout)
+
+
+class TestScanTargetsCLI(unittest.TestCase):
+    def test_scan_targets_cli_lists_files(self):
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, ".git"))
+        with open(os.path.join(root, "CLAUDE.md"), "w") as f:
+            f.write("x")
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "scan-targets"],
+            capture_output=True,
+            text=True,
+            cwd=root,
+        )
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("CLAUDE.md", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
