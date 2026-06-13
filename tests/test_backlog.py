@@ -271,6 +271,12 @@ class TestCLI(unittest.TestCase):
         r2 = self._run("show", "1")
         self.assertIn("piped body", r2.stdout)
 
+    def test_all_flag_shows_done(self):
+        self._run("add", "--title", "Done one", "--priority", "low", "--body", "x")
+        self._run("done", "1")
+        self.assertNotIn("Done one", self._run("list").stdout)
+        self.assertIn("Done one", self._run("list", "--all").stdout)
+
     def test_done_missing_id_nonzero_exit(self):
         r = self._run("done", "42")
         self.assertNotEqual(r.returncode, 0)

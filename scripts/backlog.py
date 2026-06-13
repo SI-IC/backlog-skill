@@ -227,6 +227,7 @@ def main(argv=None):
 
     pl = sub.add_parser("list")
     pl.add_argument("--status", default="open")
+    pl.add_argument("--all", action="store_true")
     pl.add_argument("--sort", default="priority")
     pl.add_argument("--priority", default=None)
 
@@ -250,7 +251,8 @@ def main(argv=None):
                 body = sys.stdin.read()
             print(cmd_add(dirpath, args.title, args.priority, body or "", now))
         elif args.cmd == "list":
-            print(cmd_list(dirpath, args.status, args.sort, args.priority, now))
+            status = "all" if args.all else args.status
+            print(cmd_list(dirpath, status, args.sort, args.priority, now))
         elif args.cmd == "show":
             print(cmd_show(dirpath, args.id), end="")
         elif args.cmd == "done":
