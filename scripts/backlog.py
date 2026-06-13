@@ -22,33 +22,54 @@ def slugify(title, maxlen=50):
     return s or "task"
 
 
+def sanitize_oneline(s):
+    """Collapse newlines/tabs/control chars to single spaces.
+
+    Frontmatter values must stay on one line; a multi-line title (pasted text
+    or hostile input) would otherwise inject fake meta fields or break the
+    format and crash listing. Body is exempt — it lives below the frontmatter.
+    """
+    s = "".join(" " if ord(ch) < 32 else ch for ch in s)
+    return re.sub(r" +", " ", s).strip()
+
+
 def serialize_entry(meta, body):
     lines = ["---"]
     for k in FIELD_ORDER:
         if k in meta:
-            lines.append(f"{k}: {meta[k]}")
+            v = str(meta[k])
+            if "\n" in v or "\r" in v:
+                raise ValueError(f"newline in frontmatter field {k!r}")
+            lines.append(f"{k}: {v}")
     fm = "\n".join(lines) + "\n---\n"
     body = (body or "").strip("\n")
     return fm + (body + "\n" if body else "\n")
 
 
 def parse_entry(text):
-    if not text.startswith("---"):
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
         raise ValueError("missing frontmatter")
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        raise ValueError("malformed frontmatter")
     meta = {}
-    for line in parts[1].strip().splitlines():
-        if not line.strip():
-            continue
-        if ":" not in line:
-            raise ValueError(f"bad meta line: {line!r}")
-        k, v = line.split(":", 1)
-        meta[k.strip()] = v.strip()
+    i = 1
+    closed = False
+    while i < len(lines):
+        if lines[i].strip() == "---":
+            closed = True
+            i += 1
+            break
+        line = lines[i]
+        if line.strip():
+            if ":" not in line:
+                raise ValueError(f"bad meta line: {line!r}")
+            k, v = line.split(":", 1)
+            meta[k.strip()] = v.strip()
+        i += 1
+    if not closed:
+        raise ValueError("malformed frontmatter")
     if "id" in meta:
         meta["id"] = int(meta["id"])
-    body = parts[2].lstrip("\n")
+    body = "\n".join(lines[i:]).lstrip("\n")
     return {"meta": meta, "body": body}
 
 
@@ -56,12 +77,19 @@ def next_id(dirpath):
     if not os.path.isdir(dirpath):
         return 1
     max_id = 0
+    # Consider both the filename prefix (covers malformed files we cannot parse)
+    # and the frontmatter id (covers files renamed away from their id) so the
+    # two sources of truth can never let an id be reused.
     for name in os.listdir(dirpath):
         if not name.endswith(".md"):
             continue
         m = re.match(r"(\d+)-", name)
         if m:
             max_id = max(max_id, int(m.group(1)))
+    for e in load_all(dirpath):
+        eid = e["meta"].get("id")
+        if isinstance(eid, int):
+            max_id = max(max_id, eid)
     return max_id + 1
 
 
@@ -74,7 +102,7 @@ def load_all(dirpath):
             continue
         path = os.path.join(dirpath, name)
         try:
-            with open(path, encoding="utf-8") as f:
+            with open(path, encoding="utf-8-sig") as f:
                 entry = parse_entry(f.read())
             entry["path"] = path
             entries.append(entry)
@@ -101,24 +129,34 @@ def iso(dt):
 def cmd_add(dirpath, title, priority, body, now):
     if priority not in PRIORITIES:
         raise ValueError(f"invalid priority: {priority}")
+    title = sanitize_oneline(title)
     os.makedirs(dirpath, exist_ok=True)
-    nid = next_id(dirpath)
     ts = iso(now)
-    meta = {
-        "id": nid,
-        "title": title,
-        "priority": priority,
-        "status": "open",
-        "created": ts,
-        "updated": ts,
-    }
-    path = os.path.join(dirpath, f"{nid}-{slugify(title)}.md")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(serialize_entry(meta, body))
-    return nid
+    # Exclusive create with retry: two concurrent adds must never silently
+    # overwrite each other's file.
+    for _ in range(100):
+        nid = next_id(dirpath)
+        meta = {
+            "id": nid,
+            "title": title,
+            "priority": priority,
+            "status": "open",
+            "created": ts,
+            "updated": ts,
+        }
+        path = os.path.join(dirpath, f"{nid}-{slugify(title)}.md")
+        try:
+            with open(path, "x", encoding="utf-8") as f:
+                f.write(serialize_entry(meta, body))
+            return nid
+        except FileExistsError:
+            continue
+    raise RuntimeError("could not allocate a backlog id")
 
 
 def age(created_str, now):
+    if not created_str:
+        return "?"
     created = datetime.strptime(created_str, "%Y-%m-%dT%H:%M:%SZ").replace(
         tzinfo=timezone.utc
     )
@@ -190,12 +228,22 @@ def cmd_set_status(dirpath, id_, status, now):
     _write_entry(e)
 
 
+UPDATABLE_FIELDS = ("title", "priority")
+
+
 def cmd_update(dirpath, id_, fields, body, now):
+    # Whitelist: id / status / created / updated are engine-managed and must
+    # not be rewritten through update.
+    bad = set(fields) - set(UPDATABLE_FIELDS)
+    if bad:
+        raise ValueError(f"cannot update fields: {sorted(bad)}")
     if "priority" in fields and fields["priority"] not in PRIORITIES:
         raise ValueError(f"invalid priority: {fields['priority']}")
     e = find_entry(dirpath, id_)
     if not e:
         raise KeyError(f"no backlog item with id {id_}")
+    if "title" in fields:
+        fields = {**fields, "title": sanitize_oneline(fields["title"])}
     e["meta"].update(fields)
     if body is not None:
         e["body"] = body
@@ -207,7 +255,8 @@ def resolve_dir(start=None):
     cur = os.path.abspath(start or os.getcwd())
     d = cur
     while True:
-        if os.path.isdir(os.path.join(d, ".git")):
+        # os.path.exists, not isdir: in git worktrees ".git" is a file.
+        if os.path.exists(os.path.join(d, ".git")):
             return os.path.join(d, "docs", "backlogs")
         parent = os.path.dirname(d)
         if parent == d:

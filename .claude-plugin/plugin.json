@@ -1,7 +1,7 @@
 {
   "name": "backlog",
   "description": "Project backlog manager — gives Claude a reliable reflex to record deferred tasks (out-of-plan only) into docs/backlogs/, with commands to list and manage them. Files-based, in-repo, no execution engine.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": {
     "name": "SI-IC"
   }

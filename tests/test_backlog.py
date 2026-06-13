@@ -304,5 +304,67 @@ class TestResolveDir(unittest.TestCase):
         )
 
 
+class TestHardening(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def test_newline_title_no_field_injection(self):
+        nid = backlog.cmd_add(self.tmp, "x\nstatus: done\nevil: yes", "low", "b", NOW)
+        e = backlog.find_entry(self.tmp, nid)
+        self.assertEqual(e["meta"]["status"], "open")
+        self.assertNotIn("evil", e["meta"])
+        self.assertNotIn("\n", e["meta"]["title"])
+
+    def test_injected_delimiter_does_not_break_format(self):
+        nid = backlog.cmd_add(self.tmp, "a\n---\ntrailer: x", "low", "", NOW)
+        out = backlog.cmd_list(self.tmp, now=NOW)  # must not raise
+        self.assertIn(str(nid), out)
+        self.assertIn("created", backlog.find_entry(self.tmp, nid)["meta"])
+
+    def test_list_survives_missing_created(self):
+        with open(os.path.join(self.tmp, "1-x.md"), "w", encoding="utf-8") as f:
+            f.write("---\nid: 1\ntitle: x\npriority: low\nstatus: open\n---\nb\n")
+        out = backlog.cmd_list(self.tmp, now=NOW)
+        self.assertIn("x", out)
+
+    def test_update_rejects_engine_fields(self):
+        nid = backlog.cmd_add(self.tmp, "t", "low", "", NOW)
+        for bad in ({"id": 9}, {"status": "done"}, {"created": "x"}):
+            with self.assertRaises(ValueError):
+                backlog.cmd_update(self.tmp, nid, bad, None, NOW)
+
+    def test_serialize_rejects_newline_field(self):
+        with self.assertRaises(ValueError):
+            backlog.serialize_entry({"id": 1, "title": "a\nb"}, "")
+
+    def test_parse_crlf(self):
+        parsed = backlog.parse_entry("---\r\nid: 1\r\ntitle: t\r\n---\r\nbody\r\n")
+        self.assertEqual(parsed["meta"]["id"], 1)
+        self.assertEqual(parsed["meta"]["title"], "t")
+
+    def test_next_id_reads_frontmatter_id(self):
+        with open(os.path.join(self.tmp, "2-x.md"), "w", encoding="utf-8") as f:
+            f.write(
+                backlog.serialize_entry({"id": 7, "title": "x", "status": "open"}, "")
+            )
+        self.assertEqual(backlog.next_id(self.tmp), 8)
+
+    def test_add_does_not_overwrite_existing(self):
+        backlog.cmd_add(self.tmp, "dup", "low", "first", NOW)
+        nid2 = backlog.cmd_add(self.tmp, "dup", "low", "second", NOW)
+        self.assertEqual(nid2, 2)
+        self.assertEqual(backlog.find_entry(self.tmp, 1)["body"].strip(), "first")
+
+    def test_resolve_dir_worktree_git_file(self):
+        root = tempfile.mkdtemp()
+        with open(os.path.join(root, ".git"), "w") as f:
+            f.write("gitdir: /somewhere\n")
+        sub = os.path.join(root, "a")
+        os.makedirs(sub)
+        self.assertEqual(
+            backlog.resolve_dir(sub), os.path.join(root, "docs", "backlogs")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
