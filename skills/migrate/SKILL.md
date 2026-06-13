@@ -67,6 +67,9 @@ are context, not tasks — never touch them.
 
 ## Body / enrichment
 
-Body = the original item text (it is also the provenance). If context is obvious
-from the source, add one line — but do NOT analyze the codebase to enrich.
-Migrated entries may be thinner than reflex-captured ones; that is fine.
+Body MUST contain the **verbatim original text** of the migrated item — never
+leave it empty. The provenance undo-net depends on it: out-of-repo memory cannot
+be restored by git, so the only way back is the original text living inside the
+backlog entry. If extra context is obvious from the source, add one line — but do
+NOT analyze the codebase to enrich. Migrated entries may be thinner than
+reflex-captured ones; that is fine, but the verbatim original is mandatory.
