@@ -45,6 +45,7 @@ claude plugin install backlog@backlog
 | `/backlog:add <запрос>`                     | добавить вручную                                                    |
 | `/backlog:done <id>`                        | пометить выполненной                                                |
 | `/backlog:cancel <id>`                      | отменить                                                            |
+| `/backlog:migrate`                          | собрать разрозненные/легаси TODO из доков и памяти проекта в бэклог |
 
 Автоматический capture-рефлекс работает без команд — Claude сам кладёт явные
 деферралы в бэклог. SessionStart-хук печатает короткое напоминание в начале каждой
@@ -106,7 +107,7 @@ claude plugin update backlog@backlog
 ## Тесты
 
 ```bash
-python3 -m unittest discover -s tests -v   # движок (47 тестов)
+python3 -m unittest discover -s tests -v   # движок (57 тестов)
 sh hooks/session-start.test.sh             # SessionStart-хук
 ```
 
@@ -118,18 +119,20 @@ backlog-skill/
 │   ├── plugin.json         # манифест плагина (version бампается при апдейтах)
 │   └── marketplace.json    # манифест marketplace (делает репо устанавливаемым)
 ├── skills/
-│   └── backlog/
-│       └── SKILL.md        # forcing function: capture + plan-boundary + discovery
+│   ├── backlog/
+│   │   └── SKILL.md        # forcing function: capture + plan-boundary + discovery
+│   └── migrate/
+│       └── SKILL.md        # миграция: детекция + импорт + аккуратное удаление
 ├── commands/
-│   ├── list.md  add.md  done.md  cancel.md
+│   ├── list.md  add.md  done.md  cancel.md  migrate.md
 ├── scripts/
-│   └── backlog.py          # CLI-движок (Python stdlib): формат, id, сортировка
+│   └── backlog.py          # CLI-движок (Python stdlib): формат, id, сортировка, scan-targets
 ├── hooks/
 │   ├── hooks.json          # регистрация SessionStart-хука
 │   ├── session-start.sh    # печатает напоминание о рефлексе
 │   └── session-start.test.sh
 ├── tests/
-│   └── test_backlog.py     # unittest-сьют движка (47 тестов)
+│   └── test_backlog.py     # unittest-сьют движка (57 тестов)
 ├── docs/
 │   └── superpowers/        # спека и план реализации
 └── README.md
