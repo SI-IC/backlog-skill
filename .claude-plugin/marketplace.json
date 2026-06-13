@@ -1,0 +1,14 @@
+{
+  "name": "backlog",
+  "description": "Backlog plugin marketplace — files-based deferred-task manager for Claude Code.",
+  "owner": {
+    "name": "SI-IC"
+  },
+  "plugins": [
+    {
+      "name": "backlog",
+      "source": "./",
+      "description": "Project backlog manager — reliable reflex to record deferred (out-of-plan) tasks into docs/backlogs/, with commands to list and manage them. Files-based, in-repo, no execution engine."
+    }
+  ]
+}
