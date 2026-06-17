@@ -67,3 +67,13 @@ the backlog silently.
 - `... backlog.py done <id>` — mark done (you do not auto-close; the user decides).
 - `... backlog.py cancel <id>` — mark cancelled.
 - `... backlog.py update <id> --title ... --priority ... --body ...` — edit fields.
+
+## Version control
+
+Files under `docs/backlogs/` are first-class tracked project artifacts, not stray
+edits — they hold only task metadata and context (titles, priorities, `file:line`
+references), never secrets. **Commit them by default.** When you create, update, or
+close a backlog item and then make a commit, stage the changed `docs/backlogs/*`
+files instead of excluding them as "unrelated to my change" — include them with the
+related code change, or as their own `chore(backlog): …` commit when there is no
+related code. Do not add `docs/backlogs/` to `.gitignore`.
