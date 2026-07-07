@@ -499,5 +499,55 @@ class TestScanTargetsCLI(unittest.TestCase):
         self.assertIn("CLAUDE.md", r.stdout)
 
 
+class TestCommandGuardrails(unittest.TestCase):
+    """Regress the invisible-output bug: `!`-inline command output is NOT shown to
+    the user, so the command file must (a) surface engine errors instead of
+    swallowing them on non-zero exit, and (b) for `list`, force the model to render
+    the backlog itself and never claim it was "shown above"."""
+
+    CMD_DIR = os.path.join(os.path.dirname(__file__), "..", "commands")
+
+    def _read(self, name):
+        with open(os.path.join(self.CMD_DIR, name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_inline_commands_surface_errors(self):
+        # `2>&1 || true` keeps stderr text and forces exit 0 so Claude Code injects
+        # the output even when the engine exits non-zero (e.g. bad id).
+        for name in ("list.md", "done.md", "cancel.md"):
+            body = self._read(name)
+            self.assertIn("2>&1 || true", body, f"{name} must surface engine errors")
+
+    def test_list_forbids_shown_above(self):
+        body = self._read("list.md")
+        self.assertIn("показан выше", body)  # the forbidden phrase, called out
+        self.assertRegex(body, r"НИКОГДА не пиши")
+
+    def test_empty_backlog_reported_without_table(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, ".git"))
+            r = subprocess.run(
+                [sys.executable, SCRIPT, "list"],
+                capture_output=True,
+                text=True,
+                cwd=root,
+            )
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("Бэклог пуст", r.stdout)
+
+    def test_bad_id_error_goes_to_stderr_nonzero(self):
+        # Engine contract the command relies on: error → stderr + exit 1.
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, ".git"))
+            r = subprocess.run(
+                [sys.executable, SCRIPT, "cancel", "99"],
+                capture_output=True,
+                text=True,
+                cwd=root,
+            )
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("error", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
