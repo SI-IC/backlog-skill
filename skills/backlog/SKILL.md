@@ -1,6 +1,6 @@
 ---
 name: backlog
-description: Use when a task is explicitly deferred beyond the current plan ("потом", "позже", "отложим", "не сейчас", "вне scope этого PR", "TODO на будущее", "сделаем в другой раз") OR when the user references the backlog ("что в бэклоге", "разберём бэклог", "положи в бэклог"). Records deferred tasks into docs/backlogs/ and reads them back. Does NOT execute tasks.
+description: Use when the user asks to record or read the backlog ("положи в бэклог", "запиши на потом", "отложим это", "что в бэклоге", "разберём бэклог") OR when you (Claude) noticed — while working — an unrelated bug or an out-of-scope side task and want, WITH the user's consent, to defer it OR when running autonomously in the background and a task needs the user's decision. Records deferred tasks into docs/backlogs/ and reads them back. Never captures silently on your own; does NOT execute tasks.
 ---
 
 # Backlog
@@ -11,13 +11,34 @@ format — always go through it, never hand-edit files.
 
 Engine: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/backlog.py" <command>`
 
-## Capture (on explicit deferral)
+## When to record — three cases only
 
-A deferral is **explicit** when the user or you decide to NOT do something now and
-do it later: "потом / позже / отложим / не сейчас / вне scope этого PR / TODO на
-будущее / сделаем в другой раз". Hypotheticals and passing remarks are NOT deferrals.
+**You NEVER capture silently on your own.** Noticing that something diverges a
+little from the current task is NOT a trigger. There are exactly three cases where
+a backlog entry is created; outside them, do not touch the backlog:
 
-On an explicit deferral, record it WITHOUT asking (you will notify, not interrupt):
+1. **The user tells you to.** Explicit instruction to defer/record: "положи в
+   бэклог / запиши на потом / отложим это / вне scope этого PR — в бэклог". Record
+   right away, no re-confirmation.
+2. **You noticed something while working — WITH the user's consent.** During the
+   task you find either (a) a **bug unrelated to the current task** that cannot or
+   should not be fixed in passing this session, or (b) an **out-of-scope side task**
+   (refactor, extraction, improvement) beyond what you were asked to do. Do NOT
+   record it yourself. Mention it and **ask once**: "записать в бэклог?" — record
+   only after the user agrees. If they say no, drop it.
+3. **You are running autonomously in the background** (circle/worktree/loop, a
+   detached session, a subagent with no interactive user) AND a task genuinely
+   needs the user's decision that you cannot make and cannot ask for right now.
+   Record it so the decision is not lost — this is the ONLY path where you write
+   without an explicit user go-ahead, and it exists precisely because no human is
+   here to be asked.
+
+Hypotheticals, passing remarks, and tasks that advance the current goal are not
+backlog material. A task that belongs to the **currently open plan** stays in the
+plan's own tracking (the active TodoWrite/Task list or the plan-doc checkboxes) —
+never mirror it into the backlog.
+
+### How to record (once one of the three cases applies)
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/backlog.py" add \
@@ -31,25 +52,6 @@ Then tell the user: `записал в бэклог #N: <title>`.
 
 The body MUST contain enough context to act later without re-reading the whole
 codebase — name the files and lines, state the decision and its rationale.
-
-## Plan boundary — backlog vs the current open plan
-
-Before recording, classify by **scope of the active plan**, not by "when":
-
-- The task advances the goal of the **currently open plan** (what we are building
-  right now) → it is NOT backlog. Keep it in the plan's tracking (the active
-  TodoWrite/Task list, or the plan-doc checkboxes). Do not create a backlog item.
-- The task is a **separate concern beyond the plan's goal** → backlog.
-
-Detect an active plan (strongest first): an active TodoWrite/Task list with open
-items; an in-progress plan/spec doc (`docs/superpowers/specs/*`, `docs/plans/*`)
-with unchecked steps; explicit conversation about executing a plan. No signal →
-no active plan → the deferral goes to the backlog.
-
-**Narrow exception to silent capture:** when an active plan exists AND it is
-ambiguous whether the task is in the plan's scope, ask once: "в план или в
-бэклог?". When a plan exists but the task is clearly outside its goal, record to
-the backlog silently.
 
 ## Discovery / read
 

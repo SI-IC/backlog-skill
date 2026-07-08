@@ -1,7 +1,7 @@
 {
   "name": "backlog",
-  "description": "Project backlog manager — gives Claude a reliable reflex to record deferred tasks (out-of-plan only) into docs/backlogs/, with commands to list and manage them. Files-based, in-repo, no execution engine.",
-  "version": "0.2.2",
+  "description": "Project backlog manager — records deferred tasks into docs/backlogs/ only when the user asks, when Claude gets consent to defer an unrelated bug or out-of-scope side task, or in a background session needing the user's decision. Never captures silently. Commands to list and manage. Files-based, in-repo, no execution engine.",
+  "version": "0.2.3",
   "author": {
     "name": "SI-IC"
   }
