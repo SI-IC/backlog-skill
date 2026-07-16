@@ -2,8 +2,11 @@
 """Backlog engine — owns the docs/backlogs file format. Stdlib only."""
 
 import argparse
+import base64
+import json
 import os
 import re
+import shlex
 import sys
 from datetime import datetime, timezone
 
@@ -192,9 +195,7 @@ def age(created_str, now):
 
 
 def cmd_list(dirpath, status="open", sort="priority", priority=None, now=None):
-    entries = load_all(dirpath)
-    if status != "all":
-        entries = [e for e in entries if e["meta"].get("status") == status]
+    entries = _filter_status(load_all(dirpath), status)
     if priority:
         entries = [e for e in entries if e["meta"].get("priority") == priority]
     if sort == "priority":
@@ -231,6 +232,18 @@ def cmd_list(dirpath, status="open", sort="priority", priority=None, now=None):
 def _write_entry(entry):
     with open(entry["path"], "w", encoding="utf-8") as f:
         f.write(serialize_entry(entry["meta"], entry["body"]))
+
+
+def _filter_status(entries, status):
+    """Keep entries matching `status`; "all" keeps everything."""
+    if status == "all":
+        return entries
+    return [e for e in entries if e["meta"].get("status") == status]
+
+
+def cmd_count(dirpath, status="open"):
+    """Number of backlog entries, filtered by status ("all" = every status)."""
+    return len(_filter_status(load_all(dirpath), status))
 
 
 def cmd_show(dirpath, id_):
@@ -344,6 +357,244 @@ def scan_targets(start=None, home=None):
     return out
 
 
+# --- statusline integration ---------------------------------------------------
+# A statusLine in Claude Code is a single command in settings.json. There is no
+# plugin contribution point, so install/uninstall edit the user's settings.json
+# and manage a self-contained wrapper script living in a STABLE config dir (not
+# the versioned plugin cache, which vanishes on plugin update). The wrapper reads
+# stdin once, delegates to any pre-existing command (inner), and appends a badge.
+
+WRAPPER_MARKER = "BACKLOG_STATUSLINE_WRAPPER"
+WRAPPER_NAME = "backlog-statusline.sh"
+
+
+def _config_dir():
+    env = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env:
+        return os.path.abspath(env)
+    return os.path.join(os.path.expanduser("~"), ".claude")
+
+
+def _wrapper_text(inner_cmd):
+    """Render the self-contained POSIX-sh wrapper embedding `inner_cmd`."""
+    inner = inner_cmd or ""
+    inner_q = shlex.quote(inner)
+    inner_b64 = base64.b64encode(inner.encode("utf-8")).decode("ascii")
+    return f"""#!/bin/sh
+# {WRAPPER_MARKER} — managed by the backlog plugin. Do not edit by hand.
+# Reinstall: /backlog:statusline-install   Remove: /backlog:statusline-uninstall
+# BACKLOG_INNER_B64:{inner_b64}
+INNER={inner_q}
+input=$(cat)
+if [ -n "$INNER" ]; then
+  if command -v timeout >/dev/null 2>&1; then
+    out=$(printf '%s' "$input" | timeout 5 sh -c "$INNER")
+  else
+    out=$(printf '%s' "$input" | sh -c "$INNER")
+  fi
+  [ -n "$out" ] && printf '%s\\n' "$out"
+fi
+_bl_get() {{
+  printf '%s' "$1" | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -n 1
+}}
+proj=$(_bl_get "$input" project_dir)
+[ -n "$proj" ] || proj=$(_bl_get "$input" current_dir)
+[ -n "$proj" ] || proj=$(_bl_get "$input" cwd)
+[ -n "$proj" ] || exit 0
+# Only absolute POSIX paths — a relative or Windows-style path would loop forever
+# in the dirname walk below (dirname stabilises at "." and never reaches "/").
+case "$proj" in
+  /*) ;;
+  *) exit 0 ;;
+esac
+root=$proj
+d=$proj
+while [ "$d" != "/" ]; do
+  if [ -e "$d/.git" ]; then root=$d; break; fi
+  d=$(dirname "$d")
+done
+dir="$root/docs/backlogs"
+[ -d "$dir" ] || exit 0
+# sub(/\\r$/) tolerates CRLF entries authored on Windows.
+count=$(awk 'FNR==1{{fm=0}} {{sub(/\\r$/,"")}} /^---$/{{fm++; next}} fm==1 && /^status:[[:space:]]*open[[:space:]]*$/{{c++}} END{{print c+0}}' "$dir"/*.md 2>/dev/null)
+[ "${{count:-0}}" -gt 0 ] && printf '\\360\\237\\223\\213 %s\\n' "$count"
+exit 0
+"""
+
+
+def _read_inner_from_wrapper(wrapper_path):
+    """Recover the original (inner) command stored in the wrapper, or ""."""
+    try:
+        with open(wrapper_path, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("# BACKLOG_INNER_B64:"):
+                    b64 = line.split(":", 1)[1].strip()
+                    return base64.b64decode(b64).decode("utf-8") if b64 else ""
+    except OSError:
+        pass
+    return ""
+
+
+def _points_to_our_wrapper(cmd, wrapper_path):
+    """True when a statusLine command already runs our managed wrapper."""
+    if not cmd:
+        return False
+    if os.path.abspath(wrapper_path) in cmd:
+        return True
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        toks = cmd.split()
+    for t in toks:
+        p = os.path.expanduser(t)
+        if os.path.isfile(p):
+            try:
+                with open(p, encoding="utf-8", errors="ignore") as f:
+                    if WRAPPER_MARKER in f.read(512):
+                        return True
+            except OSError:
+                pass
+    return False
+
+
+def _load_settings(settings_path):
+    """Parse settings.json; ABORT (ValueError) on malformed JSON — never clobber."""
+    if not os.path.exists(settings_path):
+        return {}, None
+    with open(settings_path, encoding="utf-8") as f:
+        raw = f.read()
+    if not raw.strip():
+        return {}, raw
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"{settings_path} is not valid JSON ({e}); left untouched — "
+            "fix or back it up manually, then retry."
+        )
+    if not isinstance(data, dict):
+        raise ValueError(f"{settings_path}: expected a JSON object at the root")
+    return data, raw
+
+
+def _write_private(path, text):
+    """Write text with 0600 perms — settings.json/its backup may hold secrets."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def _write_settings(settings_path, settings, prev_raw):
+    # Backup first (recovery net), then write via a temp file + atomic rename so an
+    # OOM-kill mid-write can never leave settings.json truncated/invalid.
+    if prev_raw is not None:
+        _write_private(settings_path + ".bak-backlog", prev_raw)
+    tmp = settings_path + ".tmp-backlog"
+    _write_private(tmp, json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
+    os.replace(tmp, settings_path)
+
+
+def statusline_install(config_dir=None):
+    config_dir = config_dir or _config_dir()
+    settings_path = os.path.join(config_dir, "settings.json")
+    wrapper_path = os.path.join(config_dir, WRAPPER_NAME)
+
+    settings, prev_raw = _load_settings(settings_path)  # aborts on bad JSON first
+
+    current = settings.get("statusLine")
+    inner = ""
+    already = False
+    if isinstance(current, dict) and current.get("type") == "command":
+        cmd = current.get("command", "")
+        if _points_to_our_wrapper(cmd, wrapper_path):
+            already = True
+        else:
+            inner = cmd
+
+    lost_inner = False
+    if already:
+        if os.path.isfile(wrapper_path):
+            # Idempotent: keep the ORIGINAL inner we stored earlier, never re-wrap.
+            inner = _read_inner_from_wrapper(wrapper_path)
+        else:
+            # settings.json points at a wrapper that was deleted by hand — the
+            # statusLine is already broken and the wrapped command is unrecoverable.
+            lost_inner = True
+            inner = ""
+
+    os.makedirs(config_dir, exist_ok=True)
+    with open(wrapper_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(_wrapper_text(inner))
+    os.chmod(wrapper_path, 0o700)
+
+    settings["statusLine"] = {"type": "command", "command": wrapper_path}
+    _write_settings(settings_path, settings, prev_raw)
+
+    if already:
+        if lost_inner:
+            return (
+                "Wrapper был удалён — пересоздал; statusLine снова показывает бэйдж. "
+                "Прежняя обёрнутая команда (если была) не восстановлена.\n"
+                f"wrapper: {wrapper_path}"
+            )
+        return f"statusLine уже подключён к бэклогу; wrapper обновлён.\nwrapper: {wrapper_path}"
+    if inner:
+        return (
+            "Бэйдж бэклога добавлен поверх существующего statusLine "
+            "(старая команда сохранена как inner).\n"
+            f"wrapper: {wrapper_path}\n"
+            f"бэкап настроек: {settings_path}.bak-backlog"
+        )
+    return (
+        "statusLine создан с бэйджем бэклога (📋 N).\n"
+        f"wrapper: {wrapper_path}"
+    )
+
+
+def statusline_uninstall(config_dir=None):
+    config_dir = config_dir or _config_dir()
+    settings_path = os.path.join(config_dir, "settings.json")
+    wrapper_path = os.path.join(config_dir, WRAPPER_NAME)
+
+    if not os.path.exists(settings_path):
+        removed = _rm(wrapper_path)
+        return "settings.json не найден; " + (
+            "wrapper удалён." if removed else "откатывать нечего."
+        )
+
+    settings, prev_raw = _load_settings(settings_path)
+    current = settings.get("statusLine")
+    ours = (
+        isinstance(current, dict)
+        and current.get("type") == "command"
+        and _points_to_our_wrapper(current.get("command", ""), wrapper_path)
+    )
+    if not ours:
+        return "Текущий statusLine не управляется бэклогом — оставляю как есть."
+
+    inner = _read_inner_from_wrapper(wrapper_path)
+    if inner:
+        settings["statusLine"] = {"type": "command", "command": inner}
+    else:
+        settings.pop("statusLine", None)
+    _write_settings(settings_path, settings, prev_raw)
+    _rm(wrapper_path)
+
+    if inner:
+        return "Бэйдж бэклога убран; восстановлена прежняя statusLine-команда."
+    return "Бэйдж бэклога убран; statusLine удалён (своей команды у тебя не было)."
+
+
+def _rm(path):
+    try:
+        os.remove(path)
+        return True
+    except OSError:
+        return False
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="backlog")
     p.add_argument("--dir", default=None)
@@ -373,6 +624,13 @@ def main(argv=None):
 
     sub.add_parser("scan-targets")
 
+    pc = sub.add_parser("count")
+    pc.add_argument("--status", default="open")
+    pc.add_argument("--all", action="store_true")
+
+    ps = sub.add_parser("statusline")
+    ps.add_argument("action", choices=("install", "uninstall"))
+
     args = p.parse_args(argv)
     dirpath = args.dir or resolve_dir()
     now = datetime.now(timezone.utc)
@@ -394,6 +652,14 @@ def main(argv=None):
         elif args.cmd == "scan-targets":
             for target in scan_targets():
                 print(target)
+        elif args.cmd == "count":
+            status = "all" if args.all else args.status
+            print(cmd_count(dirpath, status))
+        elif args.cmd == "statusline":
+            if args.action == "install":
+                print(statusline_install())
+            else:
+                print(statusline_uninstall())
         elif args.cmd == "list":
             status = "all" if args.all else args.status
             print(cmd_list(dirpath, status, args.sort, args.priority, now))

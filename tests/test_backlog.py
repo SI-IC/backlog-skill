@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -547,6 +548,282 @@ class TestCommandGuardrails(unittest.TestCase):
             )
             self.assertEqual(r.returncode, 1)
             self.assertIn("error", r.stderr)
+
+
+class TestCount(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def test_empty_is_zero(self):
+        self.assertEqual(backlog.cmd_count(self.tmp), 0)
+
+    def test_counts_only_open_by_default(self):
+        backlog.cmd_add(self.tmp, "a", "high", "", NOW)
+        backlog.cmd_add(self.tmp, "b", "low", "", NOW)
+        c = backlog.cmd_add(self.tmp, "c", "low", "", NOW)
+        backlog.cmd_set_status(self.tmp, c, "done", NOW)
+        self.assertEqual(backlog.cmd_count(self.tmp), 2)
+
+    def test_status_all_counts_everything(self):
+        backlog.cmd_add(self.tmp, "a", "high", "", NOW)
+        c = backlog.cmd_add(self.tmp, "c", "low", "", NOW)
+        backlog.cmd_set_status(self.tmp, c, "cancelled", NOW)
+        self.assertEqual(backlog.cmd_count(self.tmp, status="all"), 2)
+
+    def test_cli_prints_integer(self):
+        backlog.cmd_add(self.tmp, "a", "high", "", NOW)
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "--dir", self.tmp, "count"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "1")
+
+
+class TestStatuslineInstall(unittest.TestCase):
+    def setUp(self):
+        self.cfg = tempfile.mkdtemp()
+        self.settings = os.path.join(self.cfg, "settings.json")
+        self.wrapper = os.path.join(self.cfg, "backlog-statusline.sh")
+
+    def _write_settings(self, obj_or_text):
+        with open(self.settings, "w", encoding="utf-8") as f:
+            if isinstance(obj_or_text, str):
+                f.write(obj_or_text)
+            else:
+                json.dump(obj_or_text, f)
+
+    def _read_settings(self):
+        with open(self.settings, encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_fresh_install_creates_statusline(self):
+        backlog.statusline_install(self.cfg)
+        s = self._read_settings()
+        self.assertEqual(s["statusLine"]["type"], "command")
+        self.assertEqual(s["statusLine"]["command"], self.wrapper)
+        self.assertTrue(os.path.isfile(self.wrapper))
+        self.assertTrue(os.access(self.wrapper, os.X_OK))
+        with open(self.wrapper, encoding="utf-8") as f:
+            self.assertIn(backlog.WRAPPER_MARKER, f.read())
+
+    def test_install_preserves_existing_command_as_inner(self):
+        self._write_settings(
+            {"statusLine": {"type": "command", "command": "jq -r '.model.display_name'"}}
+        )
+        backlog.statusline_install(self.cfg)
+        s = self._read_settings()
+        self.assertEqual(s["statusLine"]["command"], self.wrapper)
+        self.assertEqual(
+            backlog._read_inner_from_wrapper(self.wrapper), "jq -r '.model.display_name'"
+        )
+
+    def test_double_install_is_idempotent(self):
+        self._write_settings(
+            {"statusLine": {"type": "command", "command": "echo hi"}}
+        )
+        backlog.statusline_install(self.cfg)
+        backlog.statusline_install(self.cfg)
+        s = self._read_settings()
+        self.assertEqual(s["statusLine"]["command"], self.wrapper)
+        # inner must still be the ORIGINAL, never the wrapper itself
+        self.assertEqual(backlog._read_inner_from_wrapper(self.wrapper), "echo hi")
+
+    def test_install_aborts_on_invalid_json(self):
+        self._write_settings('{ // a JSONC comment\n  "x": 1,\n}')
+        with open(self.settings, encoding="utf-8") as f:
+            before = f.read()
+        with self.assertRaises(ValueError):
+            backlog.statusline_install(self.cfg)
+        with open(self.settings, encoding="utf-8") as f:
+            self.assertEqual(f.read(), before)
+        self.assertFalse(os.path.exists(self.wrapper))
+
+    def test_install_backs_up_existing_settings(self):
+        self._write_settings({"other": True})
+        backlog.statusline_install(self.cfg)
+        self.assertTrue(os.path.exists(self.settings + ".bak-backlog"))
+        s = self._read_settings()
+        self.assertTrue(s["other"])  # unrelated keys preserved
+
+    def test_uninstall_restores_inner(self):
+        self._write_settings(
+            {"statusLine": {"type": "command", "command": "echo orig"}}
+        )
+        backlog.statusline_install(self.cfg)
+        backlog.statusline_uninstall(self.cfg)
+        s = self._read_settings()
+        self.assertEqual(s["statusLine"], {"type": "command", "command": "echo orig"})
+        self.assertFalse(os.path.exists(self.wrapper))
+
+    def test_uninstall_removes_statusline_when_no_inner(self):
+        backlog.statusline_install(self.cfg)
+        backlog.statusline_uninstall(self.cfg)
+        s = self._read_settings()
+        self.assertNotIn("statusLine", s)
+        self.assertFalse(os.path.exists(self.wrapper))
+
+    def test_uninstall_leaves_foreign_statusline_untouched(self):
+        self._write_settings(
+            {"statusLine": {"type": "command", "command": "my-own-thing"}}
+        )
+        backlog.statusline_uninstall(self.cfg)
+        s = self._read_settings()
+        self.assertEqual(s["statusLine"]["command"], "my-own-thing")
+
+    def test_uninstall_without_settings_is_safe_noop(self):
+        # No settings.json at all, with and without an orphan wrapper present.
+        msg = backlog.statusline_uninstall(self.cfg)
+        self.assertIn("settings.json", msg)
+        with open(self.wrapper, "w", encoding="utf-8") as f:
+            f.write("orphan")
+        backlog.statusline_uninstall(self.cfg)
+        self.assertFalse(os.path.exists(self.wrapper))
+
+    def test_backup_and_settings_are_private(self):
+        self._write_settings({"env": {"SECRET": "x"}})
+        backlog.statusline_install(self.cfg)
+        for p in (self.settings, self.settings + ".bak-backlog"):
+            mode = os.stat(p).st_mode & 0o777
+            self.assertEqual(mode, 0o600, f"{p} must be 0600, got {oct(mode)}")
+
+
+class TestStatuslineWrapperExecution(unittest.TestCase):
+    """Run the generated wrapper as a real shell script with sample stdin JSON."""
+
+    def _run_wrapper(self, wrapper_path, project_dir):
+        payload = json.dumps({"workspace": {"project_dir": project_dir}})
+        return subprocess.run(
+            ["sh", wrapper_path],
+            input=payload,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_badge_and_inner_output(self):
+        cfg = tempfile.mkdtemp()
+        # inner echoes a marker line; wrapper must pass it through
+        text = backlog._wrapper_text("echo INNERLINE")
+        wp = os.path.join(cfg, "backlog-statusline.sh")
+        with open(wp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(wp, 0o755)
+        repo = tempfile.mkdtemp()
+        os.makedirs(os.path.join(repo, ".git"))
+        bl = os.path.join(repo, "docs", "backlogs")
+        backlog.cmd_add(bl, "one", "high", "", NOW)
+        b = backlog.cmd_add(bl, "two", "low", "", NOW)
+        backlog.cmd_add(bl, "three", "low", "", NOW)
+        backlog.cmd_set_status(bl, b, "done", NOW)  # 2 open remain
+        r = self._run_wrapper(wp, repo)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("INNERLINE", r.stdout)
+        self.assertIn("📋 2", r.stdout)
+
+    def test_degrade_to_empty_without_backlog_dir(self):
+        cfg = tempfile.mkdtemp()
+        text = backlog._wrapper_text("")  # no inner
+        wp = os.path.join(cfg, "backlog-statusline.sh")
+        with open(wp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(wp, 0o755)
+        repo = tempfile.mkdtemp()
+        os.makedirs(os.path.join(repo, ".git"))  # no docs/backlogs
+        r = self._run_wrapper(wp, repo)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("📋", r.stdout)
+
+    def _wrapper_for(self, cfg):
+        wp = os.path.join(cfg, "backlog-statusline.sh")
+        with open(wp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(backlog._wrapper_text(""))
+        os.chmod(wp, 0o755)
+        return wp
+
+    def _repo_with_open(self, n):
+        repo = tempfile.mkdtemp()
+        os.makedirs(os.path.join(repo, ".git"))
+        bl = os.path.join(repo, "docs", "backlogs")
+        for i in range(n):
+            backlog.cmd_add(bl, f"t{i}", "medium", "", NOW)
+        return repo
+
+    def test_relative_project_dir_does_not_hang(self):
+        # A relative path must degrade to empty fast, never loop in the dirname walk.
+        wp = self._wrapper_for(tempfile.mkdtemp())
+        payload = json.dumps({"workspace": {"project_dir": "relative/path"}})
+        r = subprocess.run(
+            ["sh", wp], input=payload, capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("📋", r.stdout)
+
+    def test_counts_crlf_frontmatter(self):
+        # Entry files authored on Windows (CRLF) must still be counted.
+        wp = self._wrapper_for(tempfile.mkdtemp())
+        repo = tempfile.mkdtemp()
+        os.makedirs(os.path.join(repo, ".git"))
+        bl = os.path.join(repo, "docs", "backlogs")
+        os.makedirs(bl)
+        crlf = "---\nid: 1\ntitle: t\npriority: high\nstatus: open\n---\nbody\n"
+        crlf = crlf.replace("\n", "\r\n")
+        with open(os.path.join(bl, "1-t.md"), "w", encoding="utf-8", newline="") as f:
+            f.write(crlf)
+        r = subprocess.run(
+            ["sh", wp],
+            input=json.dumps({"workspace": {"project_dir": repo}}),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("📋 1", r.stdout)
+
+    def test_works_without_python3_in_path(self):
+        # The wrapper must not depend on python3 at render time (many runtimes lack it).
+        import shutil
+
+        wp = self._wrapper_for(tempfile.mkdtemp())
+        repo = self._repo_with_open(2)
+        # Build a minimal PATH with exactly the tools the wrapper needs, no python3.
+        bindir = tempfile.mkdtemp()
+        needed = ["sh", "sed", "awk", "head", "cat", "dirname", "printf", "command"]
+        for tool in needed:
+            src = shutil.which(tool)
+            if src:
+                try:
+                    os.symlink(src, os.path.join(bindir, tool))
+                except OSError:
+                    pass
+        env = {"PATH": bindir}
+        probe = subprocess.run(
+            ["sh", "-c", "command -v python3 || echo NONE"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("NONE", probe.stdout, "python3 leaked into the sandbox PATH")
+        r = subprocess.run(
+            ["sh", wp],
+            input=json.dumps({"workspace": {"project_dir": repo}}),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("📋 2", r.stdout)
+
+
+class TestStatuslineCommandFiles(unittest.TestCase):
+    CMD_DIR = os.path.join(os.path.dirname(__file__), "..", "commands")
+
+    def test_command_files_exist_and_surface_output(self):
+        for name in ("statusline-install.md", "statusline-uninstall.md"):
+            path = os.path.join(self.CMD_DIR, name)
+            self.assertTrue(os.path.isfile(path), f"{name} missing")
+            with open(path, encoding="utf-8") as f:
+                body = f.read()
+            self.assertIn("2>&1 || true", body, f"{name} must surface engine errors")
 
 
 if __name__ == "__main__":

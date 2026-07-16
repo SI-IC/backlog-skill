@@ -50,10 +50,29 @@ claude plugin install backlog@backlog
 | `/backlog:done <id>`                        | пометить выполненной                                                |
 | `/backlog:cancel <id>`                      | отменить                                                            |
 | `/backlog:migrate`                          | собрать разрозненные/легаси TODO из доков и памяти проекта в бэклог |
+| `/backlog:statusline-install`               | показывать бэйдж `📋 N` (открытых задач) в statusLine Claude Code   |
+| `/backlog:statusline-uninstall`             | убрать бэйдж, вернуть прежний statusLine                            |
 
 Автоматический capture-рефлекс работает без команд — Claude сам кладёт явные
 деферралы в бэклог. SessionStart-хук печатает короткое напоминание в начале каждой
 сессии, чтобы рефлекс не «забывался».
+
+### Бэйдж в statusLine
+
+`/backlog:statusline-install` добавляет в нижнюю строку Claude Code счётчик открытых
+задач текущего репозитория — `📋 N`. Так как statusLine в Claude Code — это одна
+команда в `settings.json` (отдельной точки расширения для плагинов нет), команда:
+
+- если своей statusLine у тебя нет — создаёт её;
+- если есть — оборачивает её: сначала выводит твою строку, затем бэйдж (исходная
+  команда сохраняется и восстанавливается при `uninstall`);
+- degrade-to-empty: в репозитории без `docs/backlogs/` или при нуле открытых задач
+  бэйдж не показывается, поэтому установку можно делать глобально.
+
+Правится `~/.claude/settings.json` (или `$CLAUDE_CONFIG_DIR`); перед записью
+создаётся бэкап `settings.json.bak-backlog`. Wrapper — self-contained shell-скрипт
+в том же каталоге (стабильный путь, переживает обновление плагина). Изменения
+statusLine вступают в силу в новой сессии Claude Code.
 
 ### Формат записи
 
@@ -116,7 +135,7 @@ claude plugin update backlog@backlog
 ## Тесты
 
 ```bash
-python3 -m unittest discover -s tests -v   # движок (57 тестов)
+python3 -m unittest discover -s tests -v   # движок (81 тест)
 sh hooks/session-start.test.sh             # SessionStart-хук
 ```
 
@@ -134,14 +153,15 @@ backlog-skill/
 │       └── SKILL.md        # миграция: детекция + импорт + аккуратное удаление
 ├── commands/
 │   ├── list.md  add.md  done.md  cancel.md  migrate.md
+│   └── statusline-install.md  statusline-uninstall.md
 ├── scripts/
-│   └── backlog.py          # CLI-движок (Python stdlib): формат, id, сортировка, scan-targets
+│   └── backlog.py          # CLI-движок (Python stdlib): формат, id, сортировка, count, statusline
 ├── hooks/
 │   ├── hooks.json          # регистрация SessionStart-хука
 │   ├── session-start.sh    # печатает напоминание о рефлексе
 │   └── session-start.test.sh
 ├── tests/
-│   └── test_backlog.py     # unittest-сьют движка (57 тестов)
+│   └── test_backlog.py     # unittest-сьют движка (76 тестов)
 ├── docs/
 │   └── superpowers/        # спека и план реализации
 └── README.md
