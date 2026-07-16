@@ -1,7 +1,7 @@
 {
   "name": "backlog",
   "description": "Project backlog manager — records deferred tasks into docs/backlogs/ only when the user asks, when Claude gets consent to defer an unrelated bug or out-of-scope side task, or in a background session needing the user's decision. Never captures silently. Commands to list and manage. Files-based, in-repo, no execution engine.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": {
     "name": "SI-IC"
   }
