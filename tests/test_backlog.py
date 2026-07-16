@@ -305,6 +305,67 @@ class TestResolveDir(unittest.TestCase):
         )
 
 
+class TestStatuslineWrapper(unittest.TestCase):
+    """Run the generated POSIX-sh wrapper through /bin/sh and inspect its bytes."""
+
+    OSC = b"\x1b]8;;"  # OSC 8 hyperlink introducer
+    BEL = b"\x07"  # BEL terminator
+    BADGE = b"\xf0\x9f\x93\x8b"  # 📋 (U+1F4CB) in UTF-8
+
+    def _run(self, project_dir):
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, ".git"))
+        os.makedirs(os.path.join(project_dir, "docs", "backlogs"), exist_ok=True)
+        wrapper = os.path.join(root, "wrapper.sh")
+        with open(wrapper, "w", encoding="utf-8", newline="\n") as f:
+            f.write(backlog._wrapper_text(""))
+        os.chmod(wrapper, 0o700)
+        payload = json.dumps({"project_dir": project_dir}).encode("utf-8")
+        return subprocess.run(
+            ["sh", wrapper], input=payload, capture_output=True
+        ).stdout
+
+    def _seed_open(self, project_dir, n=1):
+        d = os.path.join(project_dir, "docs", "backlogs")
+        os.makedirs(d, exist_ok=True)
+        for i in range(1, n + 1):
+            with open(os.path.join(d, f"{i}-x.md"), "w", encoding="utf-8") as f:
+                f.write(f"---\nid: {i}\ntitle: x\npriority: low\nstatus: open\n---\nb\n")
+
+    def test_badge_wrapped_in_osc8_hyperlink(self):
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, ".git"))
+        self._seed_open(root, 2)
+        out = self._run(root)
+        target = os.path.join(root, "docs", "backlogs").encode("utf-8")
+        # Opening sequence: ESC]8;;file://<dir>BEL, then the badge + count.
+        self.assertIn(self.OSC + b"file://" + target + self.BEL, out)
+        self.assertIn(self.BADGE + b" 2", out)
+        # Closing sequence: ESC]8;;BEL terminates the hyperlink.
+        self.assertTrue(out.rstrip(b"\n").endswith(self.OSC + self.BEL))
+
+    def test_path_with_space_is_percent_encoded(self):
+        # A space in the path would break the OSC 8 URI unless encoded to %20.
+        root = tempfile.mkdtemp(prefix="a b ")
+        os.makedirs(os.path.join(root, ".git"))
+        self._seed_open(root, 1)
+        out = self._run(root)
+        uri = os.path.join(root, "docs", "backlogs").replace(" ", "%20")
+        self.assertIn(b"file://" + uri.encode("utf-8") + self.BEL, out)
+        # No raw space must survive inside the URI segment.
+        seg = out.split(b"file://", 1)[1].split(self.BEL, 1)[0]
+        self.assertNotIn(b" ", seg)
+
+    def test_no_badge_when_zero_open(self):
+        # Empty state: no open tasks → no badge and no escape sequence at all.
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, ".git"))
+        os.makedirs(os.path.join(root, "docs", "backlogs"))
+        out = self._run(root)
+        self.assertNotIn(self.OSC, out)
+        self.assertNotIn(self.BADGE, out)
+
+
 class TestHardening(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

@@ -417,7 +417,13 @@ dir="$root/docs/backlogs"
 [ -d "$dir" ] || exit 0
 # sub(/\\r$/) tolerates CRLF entries authored on Windows.
 count=$(awk 'FNR==1{{fm=0}} {{sub(/\\r$/,"")}} /^---$/{{fm++; next}} fm==1 && /^status:[[:space:]]*open[[:space:]]*$/{{c++}} END{{print c+0}}' "$dir"/*.md 2>/dev/null)
-[ "${{count:-0}}" -gt 0 ] && printf '\\360\\237\\223\\213 %s\\n' "$count"
+if [ "${{count:-0}}" -gt 0 ]; then
+  # Wrap the badge in an OSC 8 hyperlink so Ctrl/Cmd-click opens the backlog dir.
+  # BEL-terminated (\\007) form — terminals without OSC 8 support drop the escape
+  # and still show the plain badge. Percent-encode URI-breaking chars in the path.
+  uri=$(printf '%s' "$dir" | sed 's/%/%25/g; s/ /%20/g; s/#/%23/g; s/?/%3F/g')
+  printf '\\033]8;;file://%s\\007\\360\\237\\223\\213 %s\\033]8;;\\007\\n' "$uri" "$count"
+fi
 exit 0
 """
 
@@ -548,7 +554,8 @@ def statusline_install(config_dir=None):
             f"бэкап настроек: {settings_path}.bak-backlog"
         )
     return (
-        "statusLine создан с бэйджем бэклога (📋 N).\n"
+        "statusLine создан с бэйджем бэклога (📋 N) — кликабельный: Ctrl/Cmd+click "
+        "открывает docs/backlogs.\n"
         f"wrapper: {wrapper_path}"
     )
 
